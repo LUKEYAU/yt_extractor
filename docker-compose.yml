@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - ENV=${ENV}
+      - GEMINI_API_KEY=${GEMINI_API_KEY} # 🍃 自動讀取 .env 裡面的金鑰
+    networks:
+      - yt-extractor-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=${VITE_API_URL}
+    networks:
+      - yt-extractor-net
+    depends_on:
+      - backend
+
+networks:
+  yt-extractor-net:
+    driver: bridge
