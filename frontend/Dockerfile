@@ -14,4 +14,4 @@ COPY . .
 EXPOSE 5173
 
 # 啟動 Vite 服務
-CMD ["npm", "run", "dev"]
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
