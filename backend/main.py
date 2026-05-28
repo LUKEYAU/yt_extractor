@@ -1,5 +1,6 @@
 import os
 import time
+import sqlite3  # 💡 引入內建 SQLite 資料庫
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -22,16 +23,55 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 💡 修正 1：明確從環境變數讀取 API KEY，避免 SDK 隱式抓取失敗
-api_key = os.environ.get("GEMINI_API_KEY")
-if not api_key:
-    print("⚠️ 警告：找不到 GEMINI_API_KEY 環境變數，請檢查 .env 檔案！")
+# 💡 初始化 SQLite 資料庫與建立資料表
+DB_PATH = "/app/history.db"
 
-client = genai.Client(api_key=api_key)
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS extraction_history (
+            video_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            content TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+# 初始化 Gemini Client
+api_key = os.environ.get("GEMINI_API_KEY")
+client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
 
 
 class ExtractRequest(BaseModel):
     video_url: str
+
+
+# 💡 新增功能：拉取所有歷史清單的路由
+@app.get("/api/history")
+async def get_history():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        # 依時間倒序排列（最新的在最上面）
+        cursor.execute(
+            "SELECT video_id, title, content FROM extraction_history ORDER BY created_at DESC"
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        history_list = [
+            {"video_id": row[0], "title": row[1], "content": row[2]} for row in rows
+        ]
+        return history_list
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"讀取歷史紀錄失敗: {str(e)}")
 
 
 @app.post("/api/extract")
@@ -66,10 +106,8 @@ async def extract_youtube_knowledge(request: ExtractRequest):
             file=audio_path,
             config=types.UploadFileConfig(mime_type="audio/m4a"),
         )
-        print(f"☁️ 檔案已成功上傳至 Gemini File API. URI: {audio_file.uri}")
 
         while audio_file.state.name == "PROCESSING":
-            print("Gemini 正在處理音檔中...")
             time.sleep(2)
             audio_file = client.files.get(name=audio_file.name)
 
@@ -77,7 +115,6 @@ async def extract_youtube_knowledge(request: ExtractRequest):
             raise HTTPException(status_code=500, detail="Gemini 處理音訊檔案失敗。")
 
         print("開始聽寫影片內容...")
-
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
@@ -88,9 +125,21 @@ async def extract_youtube_knowledge(request: ExtractRequest):
 
         try:
             client.files.delete(name=audio_file.name)
-            print("🧹 已清除 Gemini 上的暫存檔案。")
-        except Exception as delete_err:
-            print(f"⚠️ 清除 Gemini 雲端暫存檔失敗 (不影響結果): {str(delete_err)}")
+        except Exception:
+            pass
+
+        # 💡 關鍵變更：將成功萃取的結果寫入 SQLite 資料庫（若重複則覆蓋更新）
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO extraction_history (video_id, title, content)
+            VALUES (?, ?, ?)
+        """,
+            (video_id, video_title, response.text),
+        )
+        conn.commit()
+        conn.close()
 
         return {
             "status": "success",
@@ -106,4 +155,3 @@ async def extract_youtube_knowledge(request: ExtractRequest):
     finally:
         if audio_path and os.path.exists(audio_path):
             os.remove(audio_path)
-            print("已成功清理本地暫存音訊檔。")
